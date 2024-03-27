@@ -1,8 +1,9 @@
 import {
+  ConflictException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
-  UnauthorizedException 
+  UnauthorizedException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -21,48 +22,72 @@ export class AuthService {
   ) {}
 
   async signUp(signUpDto: SignUpDto): Promise<{ token: string }> {
-    const { name, email, password } = signUpDto;
+    try {
+      const { name, email, password } = signUpDto;
+      // Hash the password
+      const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Hash the password
-    const hashedPassword = await bcrypt.hash(password, 10);
+      // Create a new user instance
+      const newUser = new this.userModel({
+        name,
+        email,
+        password: hashedPassword,
+      });
 
-    // Create a new user instance
-    const newUser = new this.userModel({
-      name,
-      email,
-      password: hashedPassword,
-    });
+      // Save the user to the database
+      const savedUser = await newUser.save();
 
-    // Save the user to the database
-    const savedUser = await newUser.save();
+      // Generate JWT token
+      const token = this.jwtService.sign({ id: savedUser._id });
 
-    // Generate JWT token
-    const token = this.jwtService.sign({ id: savedUser._id });
+      // Store the token in the user document
+      savedUser.token = token;
+      await savedUser.save();
 
-    // Store the token in the user document
-    savedUser.token = token;
-    await savedUser.save();
-
-    // Return the token
-    return { token };
+      // Return the token
+      return { token };
+    } catch (error) {
+      // Handle specific error types with exception filters
+      if (error.code === 11000) {
+        // Duplicate key error
+        throw new ConflictException('Email already exists');
+      } else {
+        // Throw a generic exception for other errors
+        throw new InternalServerErrorException('Failed to create user');
+      }
+    }
   }
 
-  async login(loginDto: LoginDto): Promise<{ token: string; uid: string, name: string }> {
+  async login(
+    loginDto: LoginDto,
+  ): Promise<{ token: string; uid: string; name: string }> {
     const { email, password } = loginDto;
-    const user = await this.userModel.findOne({ email });
-    if (!user) {
+
+    try {
+      const user = await this.userModel.findOne({ email });
+
+      if (!user) {
+        throw new UnauthorizedException('Invalid email or password');
+      }
+
+      const isPasswordMatched = await bcrypt.compare(password, user.password);
+
+      if (!isPasswordMatched) {
+        throw new UnauthorizedException('Invalid email or password');
+      }
+
+      // Generate JWT token
+      const token = this.jwtService.sign({ id: user._id });
+
+      // Store the token in the user document
+      user.token = token;
+      await user.save();
+
+      return { token, uid: user._id, name: user.name }; // Include userId in the response
+    } catch (error) {
+      // Handle specific error types with exception filters
       throw new UnauthorizedException('Invalid email or password');
     }
-    const isPasswordMatched = await bcrypt.compare(password, user.password);
-    if (!isPasswordMatched) {
-      throw new UnauthorizedException('Invalid email or password');
-    }
-    // Generate JWT token
-    const token = this.jwtService.sign({ id: user._id });
-    // Store the token in the user document
-    user.token = token;
-    await user.save();
-    return { token, uid: user._id ,name: user.name}; // Include userId in the response
   }
 
   async logout(authorizationHeader: string): Promise<void> {
@@ -85,10 +110,23 @@ export class AuthService {
   }
 
   private getUserIdFromToken(token: string): string {
-    const decodedToken = this.jwtService.decode(token);
-    if (!decodedToken || typeof decodedToken !== 'object' || !decodedToken.hasOwnProperty('id')) {
-      throw new UnauthorizedException('Invalid token');
+    try {
+      const decodedToken = this.jwtService.decode(token);
+      if (
+        !decodedToken ||
+        typeof decodedToken !== 'object' ||
+        !decodedToken.hasOwnProperty('id')
+      ) {
+        throw new UnauthorizedException('Invalid token');
+      }
+      return decodedToken.id;
+    } catch (error) {
+      // Handling specific error types with exception filters
+      if (error instanceof UnauthorizedException) {
+        throw error; // Re-throwing the caught exception
+      } else {
+        throw new InternalServerErrorException('Internal server error');
+      }
     }
-    return decodedToken.id;
   }
 }

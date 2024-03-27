@@ -52,7 +52,7 @@ const RegistrationUser = () => {
           Swal.fire({
             icon: 'error',
             title: 'Oops...',
-            text: 'Something went wrong!',
+            text: 'Email already exists!',
           });
         });
     },
